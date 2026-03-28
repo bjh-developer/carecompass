@@ -18,7 +18,7 @@ mkdir -p $WS/skills/aic-facility-finder/{scripts,reference} \
 echo "[1/8] Directories created"
 
 # ── Python deps ───────────────────────────────────────────────────────────────
-python3 -m pip install requests beautifulsoup4 pymysql --quiet 2>/dev/null || pip install requests beautifulsoup4 pymysql --quiet
+python3 -m pip install requests beautifulsoup4 pymysql --quiet --break-system-packages 2>/dev/null || python3 -m pip install requests beautifulsoup4 pymysql --quiet
 echo "[2/8] Python deps installed"
 
 # ── SOUL.md ───────────────────────────────────────────────────────────────────
