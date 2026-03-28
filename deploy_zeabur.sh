@@ -839,57 +839,144 @@ ENDOFFILE
 cat > $WS/skills/caregiver-memory/scripts/memory.py << 'ENDOFFILE'
 import json, os, argparse
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-PROFILES = os.path.join(BASE, '../../memory/profiles.json')
+# Priority: mem9 -> TiDB -> JSON file
 
-def _get_conn():
-    cs = os.environ.get('TIDB_CONNECTION_STRING', '')
-    if cs:
-        try:
-            import pymysql
-            from urllib.parse import urlparse
-            p = urlparse(cs)
-            return pymysql.connect(
-                host=p.hostname, port=p.port or 4000,
-                user=p.username, password=p.password or '',
-                database=(p.path or '/carecompass').lstrip('/') or 'carecompass',
-                ssl={'ssl_verify_cert': False, 'ssl_verify_identity': False},
-                autocommit=True, charset='utf8mb4'
-            )
-        except Exception as e:
-            print(f"TiDB fallback to JSON: {e}", flush=True)
+BASE = os.path.dirname(os.path.abspath(__file__))
+PROFILES = os.path.join(BASE, '../../../memory/profiles.json')
+
+
+def _mem9_get(uid):
+    api_key = os.environ.get('MEM9_API_KEY', '')
+    if not api_key:
+        return None
+    api_url = os.environ.get('MEM9_API_URL', 'http://localhost:8080').rstrip('/')
+    try:
+        import requests
+        resp = requests.get(
+            f'{api_url}/v1alpha2/mem9s/memories',
+            headers={'X-API-Key': api_key},
+            params={'user_id': uid},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            items = resp.json()
+            if items:
+                entry = items[0]
+                return entry.get('memory_data') or entry
+    except Exception as e:
+        print(f"mem9 get failed, trying TiDB: {e}", flush=True)
     return None
 
-def get(uid):
-    conn = _get_conn()
-    if conn:
+
+def _mem9_save(uid, data):
+    api_key = os.environ.get('MEM9_API_KEY', '')
+    if not api_key:
+        return None
+    api_url = os.environ.get('MEM9_API_URL', 'http://localhost:8080').rstrip('/')
+    try:
+        import requests
+        existing = _mem9_get(uid) or {}
+        existing.update(data)
+        resp = requests.post(
+            f'{api_url}/v1alpha2/mem9s/memories',
+            headers={'X-API-Key': api_key, 'Content-Type': 'application/json'},
+            json={'user_id': uid, 'memory_data': existing},
+            timeout=5
+        )
+        if resp.status_code in (200, 201):
+            return existing
+    except Exception as e:
+        print(f"mem9 save failed, trying TiDB: {e}", flush=True)
+    return None
+
+
+def _tidb_conn():
+    cs = os.environ.get('TIDB_CONNECTION_STRING', '')
+    if not cs:
+        return None
+    try:
+        import pymysql
+        from urllib.parse import urlparse
+        p = urlparse(cs)
+        return pymysql.connect(
+            host=p.hostname, port=p.port or 4000,
+            user=p.username, password=p.password or '',
+            database=(p.path or '/carecompass').lstrip('/') or 'carecompass',
+            ssl={'ssl_verify_cert': False, 'ssl_verify_identity': False},
+            autocommit=True, charset='utf8mb4'
+        )
+    except Exception as e:
+        print(f"TiDB failed, trying JSON: {e}", flush=True)
+    return None
+
+
+def _tidb_get(uid):
+    conn = _tidb_conn()
+    if not conn:
+        return None
+    try:
         c = conn.cursor()
         c.execute("SELECT profile_json FROM caregiver_profiles WHERE user_id=%s", (uid,))
-        row = c.fetchone(); conn.close()
+        row = c.fetchone()
         return json.loads(row[0]) if row else None
-    if os.path.exists(PROFILES):
-        with open(PROFILES) as f: return json.load(f).get(uid)
-    return None
+    finally:
+        conn.close()
 
-def save(uid, data):
-    conn = _get_conn()
-    if conn:
-        existing = get(uid) or {}; existing.update(data)
+
+def _tidb_save(uid, data):
+    conn = _tidb_conn()
+    if not conn:
+        return None
+    try:
+        existing = _tidb_get(uid) or {}
+        existing.update(data)
         c = conn.cursor()
-        c.execute("INSERT INTO caregiver_profiles (user_id,profile_json) VALUES (%s,%s) ON DUPLICATE KEY UPDATE profile_json=%s",
-                  (uid, json.dumps(existing), json.dumps(existing)))
-        conn.close(); return existing
+        c.execute("""
+            INSERT INTO caregiver_profiles (user_id, profile_json)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE profile_json=%s
+        """, (uid, json.dumps(existing), json.dumps(existing)))
+        return existing
+    finally:
+        conn.close()
+
+
+def _json_get(uid):
+    if not os.path.exists(PROFILES):
+        return None
+    with open(PROFILES) as f:
+        return json.load(f).get(uid)
+
+
+def _json_save(uid, data):
     profiles = {}
     if os.path.exists(PROFILES):
-        with open(PROFILES) as f: profiles = json.load(f)
+        with open(PROFILES) as f:
+            profiles = json.load(f)
     profiles.setdefault(uid, {}).update(data)
     os.makedirs(os.path.dirname(PROFILES), exist_ok=True)
-    with open(PROFILES, 'w') as f: json.dump(profiles, f, indent=2)
+    with open(PROFILES, 'w') as f:
+        json.dump(profiles, f, indent=2)
     return profiles[uid]
+
+
+def get(uid):
+    return _mem9_get(uid) or _tidb_get(uid) or _json_get(uid)
+
+
+def save(uid, data):
+    result = _mem9_save(uid, data)
+    if result is not None:
+        return result
+    result = _tidb_save(uid, data)
+    if result is not None:
+        return result
+    return _json_save(uid, data)
+
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument('--action', choices=['get','save'], required=True)
+    p.add_argument('--action', choices=['get', 'save'], required=True)
     p.add_argument('--user_id', required=True)
     p.add_argument('--data', default='{}')
     args = p.parse_args()
