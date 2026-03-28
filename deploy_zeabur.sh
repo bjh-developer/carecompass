@@ -939,15 +939,19 @@ if not cs:
     sys.exit("ERROR: TIDB_CONNECTION_STRING not set.")
 
 p = urlparse(cs)
+dbname = (p.path or '/carecompass').lstrip('/') or 'carecompass'
+
+# Connect without database first to create it if needed
 conn = pymysql.connect(
     host=p.hostname, port=p.port or 4000,
     user=p.username, password=p.password or '',
-    database=(p.path or '/carecompass').lstrip('/') or 'carecompass',
     ssl={'ssl_verify_cert': False, 'ssl_verify_identity': False},
     autocommit=True, charset='utf8mb4'
 )
 c = conn.cursor()
-print("Connected to TiDB at " + str(p.hostname))
+c.execute("CREATE DATABASE IF NOT EXISTS `" + dbname + "` CHARACTER SET utf8mb4")
+c.execute("USE `" + dbname + "`")
+print("Connected to TiDB at " + str(p.hostname) + ", using database: " + dbname)
 
 TABLES = [
     """CREATE TABLE IF NOT EXISTS facilities (
