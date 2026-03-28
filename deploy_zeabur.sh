@@ -920,8 +920,9 @@ echo "[6/8] Fallback JSON written"
 # ── TiDB setup or SQLite fallback ─────────────────────────────────────────────
 echo '{}' > $WS/memory/profiles.json
 
-# Write tidb_setup.py to the workspace
-cat > $WS/data/tidb_setup.py << 'ENDOFFILE'
+if [ -n "$TIDB_CONNECTION_STRING" ]; then
+    echo "Running TiDB setup..."
+    python3 - << 'CARECOMPASS_TIDB_SETUP_EOF'
 import os, json, sys
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
@@ -946,7 +947,7 @@ conn = pymysql.connect(
     autocommit=True, charset='utf8mb4'
 )
 c = conn.cursor()
-print(f"Connected to TiDB at {p.hostname}")
+print("Connected to TiDB at " + str(p.hostname))
 
 TABLES = [
     """CREATE TABLE IF NOT EXISTS facilities (
@@ -996,7 +997,7 @@ if c.fetchone()[0] == 0:
 
 c.execute("SELECT subsidy_pct FROM subsidy_tiers WHERE care_type='nursing_home' AND pchi_min<=2000 AND pchi_max>=2000 AND citizenship='SC'")
 row = c.fetchone()
-assert row and row[0] == 75, f"CRITICAL: PCHI 2000 expected 75%, got {row}"
+assert row and row[0] == 75, "CRITICAL: PCHI 2000 expected 75%, got " + str(row)
 print("PCHI 2000 -> 75% OK")
 
 c.execute("SELECT COUNT(*) FROM facilities")
@@ -1043,11 +1044,7 @@ if c.fetchone()[0] == 0:
 
 conn.close()
 print("TiDB setup complete.")
-ENDOFFILE
-
-if [ -n "$TIDB_CONNECTION_STRING" ]; then
-    echo "Running TiDB setup..."
-    python3 $WS/data/tidb_setup.py
+CARECOMPASS_TIDB_SETUP_EOF
 else
     echo "TIDB_CONNECTION_STRING not set — initialising SQLite fallback..."
     python3 - << 'PYEOF'
