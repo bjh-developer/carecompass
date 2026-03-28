@@ -920,6 +920,131 @@ echo "[6/8] Fallback JSON written"
 # ── TiDB setup or SQLite fallback ─────────────────────────────────────────────
 echo '{}' > $WS/memory/profiles.json
 
+# Write tidb_setup.py to the workspace
+cat > $WS/data/tidb_setup.py << 'ENDOFFILE'
+import os, json, sys
+from urllib.parse import urlparse
+from datetime import datetime, timedelta
+
+try:
+    import pymysql
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pymysql', '--break-system-packages', '--quiet'])
+    import pymysql
+
+cs = os.environ.get('TIDB_CONNECTION_STRING', '')
+if not cs:
+    sys.exit("ERROR: TIDB_CONNECTION_STRING not set.")
+
+p = urlparse(cs)
+conn = pymysql.connect(
+    host=p.hostname, port=p.port or 4000,
+    user=p.username, password=p.password or '',
+    database=(p.path or '/carecompass').lstrip('/') or 'carecompass',
+    ssl={'ssl_verify_cert': False, 'ssl_verify_identity': False},
+    autocommit=True, charset='utf8mb4'
+)
+c = conn.cursor()
+print(f"Connected to TiDB at {p.hostname}")
+
+TABLES = [
+    """CREATE TABLE IF NOT EXISTS facilities (
+      id INT AUTO_INCREMENT PRIMARY KEY, name TEXT NOT NULL, address TEXT,
+      town VARCHAR(100), postal_code VARCHAR(20), care_types TEXT,
+      accepts_subsidies INT DEFAULT 1, vacancy_status VARCHAR(50) DEFAULT 'unknown',
+      contact_phone VARCHAR(50), contact_email VARCHAR(100), scraped_at VARCHAR(50)
+    )""",
+    """CREATE TABLE IF NOT EXISTS subsidy_tiers (
+      id INT AUTO_INCREMENT PRIMARY KEY, care_type VARCHAR(50) NOT NULL,
+      pchi_min INT NOT NULL, pchi_max INT NOT NULL, subsidy_pct INT NOT NULL,
+      effective_cost_min INT NOT NULL, effective_cost_max INT NOT NULL,
+      citizenship VARCHAR(10) DEFAULT 'SC', valid_from VARCHAR(20)
+    )""",
+    """CREATE TABLE IF NOT EXISTS care_events (
+      id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(100) NOT NULL,
+      category VARCHAR(50), summary TEXT, severity VARCHAR(20) DEFAULT 'routine',
+      raw_message TEXT, created_at VARCHAR(50),
+      INDEX idx_events (user_id, created_at)
+    )""",
+    """CREATE TABLE IF NOT EXISTS notifications (
+      id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(100) NOT NULL,
+      type VARCHAR(50), message TEXT, facility_name TEXT, town VARCHAR(100),
+      read_flag INT DEFAULT 0, created_at VARCHAR(50),
+      INDEX idx_notifs (user_id, read_flag)
+    )""",
+    """CREATE TABLE IF NOT EXISTS caregiver_profiles (
+      user_id VARCHAR(100) PRIMARY KEY, profile_json TEXT NOT NULL
+    )""",
+]
+for ddl in TABLES:
+    c.execute(ddl)
+print("Tables created")
+
+c.execute("SELECT COUNT(*) FROM subsidy_tiers")
+if c.fetchone()[0] == 0:
+    tiers = [
+        ('nursing_home',0,1200,80,700,900,'SC'),('nursing_home',1201,2000,75,900,1100,'SC'),
+        ('nursing_home',2001,2800,65,1100,1600,'SC'),('nursing_home',2801,3600,50,1400,2000,'SC'),
+        ('nursing_home',3601,4800,25,2000,2600,'SC'),('nursing_home',4801,999999,0,4500,6000,'SC'),
+        ('day_care',0,1200,80,25,35,'SC'),('day_care',1201,2000,75,35,50,'SC'),
+        ('day_care',2001,2800,65,45,65,'SC'),('day_care',2801,3600,50,55,80,'SC'),
+        ('day_care',3601,4800,25,65,90,'SC'),('day_care',4801,999999,0,90,150,'SC'),
+    ]
+    c.executemany("INSERT INTO subsidy_tiers (care_type,pchi_min,pchi_max,subsidy_pct,effective_cost_min,effective_cost_max,citizenship,valid_from) VALUES (%s,%s,%s,%s,%s,%s,%s,'2026-04-01')", tiers)
+    print("Subsidy tiers seeded")
+
+c.execute("SELECT subsidy_pct FROM subsidy_tiers WHERE care_type='nursing_home' AND pchi_min<=2000 AND pchi_max>=2000 AND citizenship='SC'")
+row = c.fetchone()
+assert row and row[0] == 75, f"CRITICAL: PCHI 2000 expected 75%, got {row}"
+print("PCHI 2000 -> 75% OK")
+
+c.execute("SELECT COUNT(*) FROM facilities")
+if c.fetchone()[0] == 0:
+    now = datetime.now().isoformat()
+    facilities = [
+        ('Bright Hill Evergreen Home','22 Sin Ming Road, Singapore 575580','BISHAN','["nursing_home","dementia_care"]',1,'unknown','6453 3644',now),
+        ('Lions Home for the Elders','10 Bishan Street 13, Singapore 579779','BISHAN','["nursing_home"]',1,'unknown','6255 0655',now),
+        ('Thye Hua Kwan Nursing Home (Bishan)','9 Bishan Place, Singapore 579839','BISHAN','["nursing_home","day_care"]',1,'unknown','6251 3038',now),
+        ("St Luke's ElderCare (Ang Mo Kio)",'3 Ang Mo Kio Street 62, Singapore 569141','ANG MO KIO','["nursing_home","day_care","dementia_care"]',1,'unknown','6453 6930',now),
+        ('NTUC Health Nursing Home (Jurong West)','2 Jurong West Avenue 1, Singapore 649520','JURONG WEST','["nursing_home"]',1,'unknown','6563 8998',now),
+        ('Apex Harmony Lodge','10 Buangkok View, Singapore 539747','HOUGANG','["nursing_home","dementia_care"]',1,'unknown','6385 1538',now),
+        ('Orange Valley Nursing Home (Clementi)','55 Clementi Road, Singapore 129908','CLEMENTI','["nursing_home"]',1,'unknown','6463 2889',now),
+    ]
+    c.executemany("INSERT INTO facilities (name,address,town,care_types,accepts_subsidies,vacancy_status,contact_phone,scraped_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", facilities)
+    print("Facilities seeded")
+
+c.execute("SELECT COUNT(*) FROM notifications WHERE user_id='usr_demo001'")
+if c.fetchone()[0] == 0:
+    c.execute("INSERT INTO notifications (user_id,type,message,facility_name,town,read_flag,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        ('usr_demo001','bed_available',"A bed has opened at Bright Hill Evergreen Home in Bishan matching your mother's care needs. Call 6453 3644 to enquire — beds go quickly.",'Bright Hill Evergreen Home','BISHAN',0,datetime.now().isoformat()))
+    print("Demo notification seeded")
+
+c.execute("SELECT COUNT(*) FROM care_events WHERE user_id='usr_demo001'")
+if c.fetchone()[0] == 0:
+    def ago(d): return (datetime.now()-timedelta(days=d)).isoformat()
+    events = [
+        ('usr_demo001','medication','Took Aricept and Amlodipine','routine','Mum took her Aricept and blood pressure pill this morning, good mood',ago(6)),
+        ('usr_demo001','nutrition','Refused dinner, ate half a banana','notable','She refused dinner, only ate half a banana, complained stomach hurt',ago(5)),
+        ('usr_demo001','incident','Bathroom fall, no injury','notable','Small fall in the bathroom around 3pm, no injury but she was shaken',ago(4)),
+        ('usr_demo001','sleep','Disrupted night, confusion at 2am','notable','Slept terribly last night, up three times, very confused at 2am',ago(3)),
+        ('usr_demo001','medication','Refused morning Aricept','notable','She refused her morning Aricept again, said it makes her nauseous',ago(2)),
+        ('usr_demo001','medication','Refused medication at lunch','notable','Mum refused her medication at lunch, getting harder to convince her',ago(2)),
+        ('usr_demo001','medication','Refused evening Aricept','notable','She refused her evening medication again tonight',ago(1)),
+    ]
+    c.executemany("INSERT INTO care_events (user_id,category,summary,severity,raw_message,created_at) VALUES (%s,%s,%s,%s,%s,%s)", events)
+    print("Demo care events seeded (7)")
+
+c.execute("SELECT COUNT(*) FROM caregiver_profiles WHERE user_id='usr_demo001'")
+if c.fetchone()[0] == 0:
+    profile = {"elder_name":"Mrs Tan","elder_condition":"early dementia","elder_town":"BISHAN","family_monthly_income":8000,"household_size":4,"citizenship":"SC"}
+    c.execute("INSERT INTO caregiver_profiles (user_id,profile_json) VALUES (%s,%s)", ('usr_demo001', json.dumps(profile)))
+    print("Demo profile seeded")
+
+conn.close()
+print("TiDB setup complete.")
+ENDOFFILE
+
 if [ -n "$TIDB_CONNECTION_STRING" ]; then
     echo "Running TiDB setup..."
     python3 $WS/data/tidb_setup.py
